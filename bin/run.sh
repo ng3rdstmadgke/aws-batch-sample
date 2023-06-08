@@ -34,6 +34,7 @@ done
 
 
 set -e
+cd $ROOT_DIR
 IMAGE_NAME="aws-batch-sample/job:latest"
 docker build --rm -f docker/job/Dockerfile -t $IMAGE_NAME .
 

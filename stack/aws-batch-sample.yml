@@ -1,0 +1,146 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Parameters:
+  ProjectPrefix:
+    Type: String
+    Default: "aws-batch-sample"
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: vpc-xxxxxxxxxxxxxxxxx
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: subnet-xxxxxxxxxxxxxxxxx
+  JobImage:
+    Type: String
+    Description: xxxxxxxxxxxx.dkr.ecr.ap-northeast-1.amazonaws.com/xxxxxx/yyyy:latest
+
+Resources:
+  # コンピューティング環境用のセキュリティグループ
+  ComputeEnvironmentSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "for computing environment"
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectPrefix}-sg
+
+  # コンピューティング環境のサービスロール
+  # https://docs.aws.amazon.com/ja_jp/batch/latest/userguide/execution-IAM-role.html
+  ComputeEnvironmentServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - sts:AssumeRole
+            Principal:
+              Service:
+                - batch.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSBatchServiceRole
+      RoleName: !Sub ${ProjectPrefix}-computeEnvironmentServiceRole
+
+  # ジョブの実行ロール
+  # https://docs.aws.amazon.com/ja_jp/batch/latest/userguide/execution-IAM-role.html
+  EcsTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - sts:AssumeRole
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      RoleName: !Sub ${ProjectPrefix}-ecsTaskExecutionRole
+
+  # ジョブロール
+  # ジョブコンテナに適用されるロール。
+  # https://docs.aws.amazon.com/ja_jp/AmazonECS/latest/developerguide/task-iam-roles.html
+  EcsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - sts:AssumeRole
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+      RoleName: !Sub ${ProjectPrefix}-ecsTaskRole
+
+  # コンピューティング環境(Fargate)
+  # https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-resource-batch-computeenvironment.html
+  ComputeEnvironment:
+    Type: AWS::Batch::ComputeEnvironment
+    Properties:
+      ComputeEnvironmentName: !Sub ${ProjectPrefix}-fargate
+      ServiceRole: !Ref ComputeEnvironmentServiceRole
+      ComputeResources: # https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-properties-batch-computeenvironment-computeresources.html
+        MaxvCpus: 4                      # コンピューティング環境のEC2のvCPUS数(最大値)を指定。
+        SecurityGroupIds:                # コンピューティング環境のEC2にアタッチされるセキュリティグループ
+          - !Ref ComputeEnvironmentSg
+        Subnets:                         # コンピューティングリソースが起動するサブネット。
+          - !Ref SubnetId
+        Type: FARGATE                    # (必須)プロビジョニングモデルを指定。(EC2, FARGATE, SPOT, FARGATE_SPOT)
+      State: ENABLED
+      Type: MANAGED  # Furgaetの場合はMANAGEDを指定
+
+  # ジョブキュー
+  # https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-resource-batch-jobqueue.html
+  JobQueue:
+    Type: AWS::Batch::JobQueue
+    Properties:
+      ComputeEnvironmentOrder: # キューに送信されたジョブをスケジューリングするコンピューティング環境を指定
+        # https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-properties-batch-jobqueue-computeenvironmentorder.html
+        - Order: 1  # 数値が小さいコンピューティング環境に優先してjobが割り当てられる
+          ComputeEnvironment: !Ref ComputeEnvironment
+      JobQueueName: !Sub ${ProjectPrefix}-queue
+      Priority: 10             # 優先度が高いほど優先的に処理される
+      State: ENABLED
+
+  # ジョブ定義
+  # https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-resource-batch-jobdefinition.html
+  JobDefinition:
+    Type: AWS::Batch::JobDefinition
+    Properties:
+      Type: container      # container もしくは multinode を設定
+      JobDefinitionName: !Sub ${ProjectPrefix}-job
+      Timeout:
+        AttemptDurationSeconds: 3600 # ジョブのタイムアウトを設定(秒)
+      PlatformCapabilities: # ジョブを実行するプラットフォームの指定(未指定の場合はEC2)
+        - FARGATE
+      ContainerProperties: # ジョブコンテナの起動に関する設定
+        # https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-properties-batch-jobdefinition-containerproperties.html
+        Command:           # コンテナの起動コマンド。 CMD が設定されていれば指定しなくてもOK
+          - bash
+          - /entrypoint.sh
+        Environment:       # コンテナに設定される環境変数の定義
+          - Name: SAMPLE_ENV
+            Value: hoge
+        ExecutionRoleArn: !GetAtt EcsTaskExecutionRole.Arn # ECSエージェントにジョブを実行する権限を付与するためのロール。
+        Image: !Ref JobImage
+        JobRoleArn: !GetAtt EcsTaskRole.Arn  # ジョブコンテナにAWSサービスのアクセス権限を付与するためのロール。
+        ResourceRequirements: # MEMORY, VCPU, GPU などコンテナが利用できるリソースを定義
+          # メモリとCPUの組み合わせはある程度決まっているので、以下のリンクを参考にすると良い。
+          # https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-properties-batch-jobdefinition-resourcerequirement.html
+          - Type: MEMORY # コンテナが利用できるメモリのハードリミット(MiB)。超えるとコンテナが落ちる。
+            Value: 2048
+          - Type: VCPU   # コンテナが利用できるvCPU数
+            Value: 1
