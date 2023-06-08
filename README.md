@@ -33,3 +33,9 @@ SUBNET_ID=subnet-xxxxxxxxxxxxxxxxx
 # Delete
 ./bin/delete-stack.sh
 ```
+
+# Jobの投入
+
+```bash
+./bin/submit-job.sh
+```
